@@ -29,7 +29,20 @@ class _FakePokemonRepository implements PokemonRepository {
   @override
   Future<Pokemon> search(String query) async {
     searches.add(query);
-    return const Pokemon(id: 25, name: 'pikachu', types: ['electric']);
+    if (query.toLowerCase() == 'charizard' || query == '6') {
+      return const Pokemon(
+        id: 6,
+        name: 'charizard',
+        types: ['fire', 'flying'],
+        stats: {'hp': 78, 'attack': 84, 'defense': 78},
+      );
+    }
+    return const Pokemon(
+      id: 25,
+      name: 'pikachu',
+      types: ['electric'],
+      stats: {'hp': 35, 'attack': 55, 'defense': 40},
+    );
   }
 }
 
@@ -95,4 +108,37 @@ void main() {
     expect(find.text('45'), findsOneWidget);
     expect(find.text('49'), findsNWidgets(2));
   });
+
+  testWidgets('loads two Pokémon and compares their base stats', (
+    tester,
+  ) async {
+    final repository = _FakePokemonRepository();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: PokemonComparePage(repository: repository, database: null),
+      ),
+    );
+    await _pumpFrames(tester);
+
+    await tester.enterText(find.byType(TextField).at(0), 'pikachu');
+    await tester.tap(find.byTooltip('Buscar Primeiro Pokémon'));
+    await _pumpFrames(tester);
+    await tester.enterText(find.byType(TextField).at(1), 'charizard');
+    await tester.tap(find.byTooltip('Buscar Segundo Pokémon'));
+    await _pumpFrames(tester);
+
+    expect(find.text('ATRIBUTOS BASE'), findsOneWidget);
+    expect(find.text('HP'), findsOneWidget);
+    expect(find.text('Ataque'), findsOneWidget);
+    expect(find.text('Defesa'), findsOneWidget);
+    expect(find.text('35'), findsOneWidget);
+    expect(find.text('84'), findsOneWidget);
+  });
+}
+
+Future<void> _pumpFrames(WidgetTester tester) async {
+  for (var frame = 0; frame < 4; frame++) {
+    await tester.pump(const Duration(milliseconds: 80));
+  }
 }
