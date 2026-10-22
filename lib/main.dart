@@ -3,12 +3,21 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
-void main() {
-  runApp(const PokedexApp());
+import 'data/pokedex_database.dart';
+import 'models/pokemon.dart';
+
+export 'models/pokemon.dart';
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final database = await PokedexDatabase.open();
+  runApp(PokedexApp(database: database));
 }
 
 class PokedexApp extends StatelessWidget {
-  const PokedexApp({super.key});
+  const PokedexApp({super.key, required this.database});
+
+  final PokedexDatabase database;
 
   @override
   Widget build(BuildContext context) {
@@ -24,41 +33,7 @@ class PokedexApp extends StatelessWidget {
         ),
         fontFamily: 'Roboto',
       ),
-      home: const PokedexHomePage(),
-    );
-  }
-}
-
-class Pokemon {
-  const Pokemon({
-    required this.id,
-    required this.name,
-    required this.types,
-    this.stats = const {},
-  });
-
-  final int id;
-  final String name;
-  final List<String> types;
-  final Map<String, int> stats;
-
-  String get imageUrl =>
-      'https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/$id.png';
-
-  factory Pokemon.fromJson(Map<String, dynamic> json) {
-    final types = (json['types'] as List<dynamic>? ?? const [])
-        .map((item) => item['type']['name'] as String)
-        .toList();
-    final stats = {
-      for (final item in json['stats'] as List<dynamic>? ?? const [])
-        item['stat']['name'] as String: item['base_stat'] as int,
-    };
-
-    return Pokemon(
-      id: json['id'] as int,
-      name: json['name'] as String,
-      types: types,
-      stats: stats,
+      home: PokedexHomePage(database: database),
     );
   }
 }
@@ -69,7 +44,10 @@ abstract interface class PokemonRepository {
 }
 
 class PokeApiService implements PokemonRepository {
+  PokeApiService({this.database});
+
   static const _baseUrl = 'https://pokeapi.co/api/v2';
+  final PokedexDatabase? database;
   final Map<String, Pokemon> _cache = {};
 
   @override
@@ -106,14 +84,16 @@ class PokeApiService implements PokemonRepository {
 
     final pokemon = Pokemon.fromJson(jsonDecode(response.body));
     _cache[pokemon.name] = pokemon;
+    await database?.savePokemon(pokemon);
     return pokemon;
   }
 }
 
 class PokedexHomePage extends StatefulWidget {
-  const PokedexHomePage({super.key, this.repository});
+  const PokedexHomePage({super.key, this.repository, this.database});
 
   final PokemonRepository? repository;
+  final PokedexDatabase? database;
 
   @override
   State<PokedexHomePage> createState() => _PokedexHomePageState();
@@ -135,7 +115,8 @@ class _PokedexHomePageState extends State<PokedexHomePage> {
   @override
   void initState() {
     super.initState();
-    _api = widget.repository ?? PokeApiService();
+    _api = widget.repository ?? PokeApiService(database: widget.database);
+    _loadFavorites();
     _loadPage();
     _scrollController.addListener(_onScroll);
   }
@@ -145,6 +126,14 @@ class _PokedexHomePageState extends State<PokedexHomePage> {
     _scrollController.dispose();
     _searchController.dispose();
     super.dispose();
+  }
+
+  Future<void> _loadFavorites() async {
+    final database = widget.database;
+    if (database == null) return;
+    final favoriteIds = await database.getFavoriteIds();
+    if (!mounted) return;
+    setState(() => _favorites.addAll(favoriteIds));
   }
 
   void _onScroll() {
@@ -247,7 +236,19 @@ class _PokedexHomePageState extends State<PokedexHomePage> {
     _loadPage();
   }
 
-  void _toggleFavorite(Pokemon pokemon) {
+  Future<void> _toggleFavorite(Pokemon pokemon) async {
+    final database = widget.database;
+    if (database != null) {
+      await database.toggleFavorite(pokemon);
+      final favoriteIds = await database.getFavoriteIds();
+      if (!mounted) return;
+      setState(() {
+        _favorites
+          ..clear()
+          ..addAll(favoriteIds);
+      });
+      return;
+    }
     setState(() {
       if (!_favorites.add(pokemon.id)) _favorites.remove(pokemon.id);
     });
@@ -587,6 +588,15 @@ class _PokedexHomePageState extends State<PokedexHomePage> {
     );
   }
 
+  void _openComparator() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) =>
+            PokemonComparePage(repository: _api, database: widget.database),
+      ),
+    );
+  }
+
   Widget _buildBottomBar() {
     return Container(
       decoration: const BoxDecoration(
@@ -612,10 +622,11 @@ class _PokedexHomePageState extends State<PokedexHomePage> {
                   selected: true,
                 ),
               ),
-              const Expanded(
+              Expanded(
                 child: _NavItem(
                   icon: Icons.compare_arrows_rounded,
                   label: 'Comparar',
+                  onTap: _openComparator,
                 ),
               ),
               const Expanded(
@@ -830,6 +841,477 @@ class PokemonCard extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+class PokemonComparePage extends StatefulWidget {
+  const PokemonComparePage({
+    super.key,
+    required this.repository,
+    required this.database,
+  });
+
+  final PokemonRepository repository;
+  final PokedexDatabase? database;
+
+  @override
+  State<PokemonComparePage> createState() => _PokemonComparePageState();
+}
+
+class _PokemonComparePageState extends State<PokemonComparePage> {
+  final _firstController = TextEditingController();
+  final _secondController = TextEditingController();
+  Pokemon? _first;
+  Pokemon? _second;
+  int? _loadingSlot;
+  int _savedComparisons = 0;
+  String? _error;
+  bool _isSaving = false;
+  bool _comparisonSaved = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadComparisonCount();
+  }
+
+  @override
+  void dispose() {
+    _firstController.dispose();
+    _secondController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadComparisonCount() async {
+    final count = await widget.database?.getComparisonCount() ?? 0;
+    if (mounted) setState(() => _savedComparisons = count);
+  }
+
+  Future<void> _loadPokemon(int slot) async {
+    final controller = slot == 1 ? _firstController : _secondController;
+    final query = controller.text.trim();
+    if (query.isEmpty) {
+      setState(() => _error = 'Digite um nome ou número de Pokémon.');
+      return;
+    }
+
+    setState(() {
+      _loadingSlot = slot;
+      _error = null;
+      _comparisonSaved = false;
+    });
+    try {
+      final pokemon = await widget.repository.search(query);
+      if (!mounted) return;
+      setState(() {
+        if (slot == 1) {
+          _first = pokemon;
+        } else {
+          _second = pokemon;
+        }
+        _loadingSlot = null;
+      });
+    } on FormatException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _error = error.message;
+        _loadingSlot = null;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _error = 'Não foi possível buscar o Pokémon. Tente novamente.';
+        _loadingSlot = null;
+      });
+    }
+  }
+
+  Future<void> _saveComparison() async {
+    final first = _first;
+    final second = _second;
+    if (first == null || second == null) return;
+    if (first.id == second.id) {
+      setState(() => _error = 'Escolha dois Pokémon diferentes para comparar.');
+      return;
+    }
+
+    setState(() {
+      _isSaving = true;
+      _error = null;
+    });
+    try {
+      await widget.database?.saveComparison(first, second);
+      if (!mounted) return;
+      setState(() {
+        _isSaving = false;
+        _comparisonSaved = true;
+        _savedComparisons++;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _isSaving = false;
+        _error = 'Não foi possível salvar a comparação no SQLite.';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFFFF9EF),
+      appBar: AppBar(
+        title: const Text(
+          'Comparador',
+          style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800),
+        ),
+        centerTitle: true,
+        backgroundColor: const Color(0xFFFFF9EF),
+        surfaceTintColor: Colors.transparent,
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(20, 8, 20, 28),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(24),
+                gradient: const LinearGradient(
+                  colors: [Color(0xFF7166C8), Color(0xFF9B6CCB)],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+              ),
+              child: const Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(
+                    Icons.compare_arrows_rounded,
+                    color: Colors.white,
+                    size: 30,
+                  ),
+                  SizedBox(height: 10),
+                  Text(
+                    'Quem leva a melhor?',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 22,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  SizedBox(height: 5),
+                  Text(
+                    'Escolha dois Pokémon e compare os atributos base.',
+                    style: TextStyle(color: Color(0xFFEDE8FF), fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 18),
+            _buildPokemonPicker(
+              slot: 1,
+              controller: _firstController,
+              pokemon: _first,
+              label: 'Primeiro Pokémon',
+              hint: 'Ex.: pikachu ou 25',
+            ),
+            const SizedBox(height: 12),
+            const Center(
+              child: Text(
+                'VS',
+                style: TextStyle(
+                  color: Color(0xFFE94B4B),
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 2,
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            _buildPokemonPicker(
+              slot: 2,
+              controller: _secondController,
+              pokemon: _second,
+              label: 'Segundo Pokémon',
+              hint: 'Ex.: charizard ou 6',
+            ),
+            if (_error != null) ...[
+              const SizedBox(height: 12),
+              Text(
+                _error!,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: Color(0xFFC53F3F),
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+            if (_first != null && _second != null) ...[
+              const SizedBox(height: 18),
+              FilledButton.icon(
+                onPressed: _isSaving ? null : _saveComparison,
+                icon: _isSaving
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Icon(Icons.equalizer_rounded),
+                label: Text(_isSaving ? 'Salvando...' : 'Comparar e salvar'),
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFFE94B4B),
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
+              ),
+              const SizedBox(height: 18),
+              _buildComparisonResults(),
+              if (_comparisonSaved) ...[
+                const SizedBox(height: 12),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(
+                      Icons.check_circle_rounded,
+                      size: 16,
+                      color: Color(0xFF53A875),
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      'Salva no SQLite • $_savedComparisons comparações',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: Color(0xFF568165),
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPokemonPicker({
+    required int slot,
+    required TextEditingController controller,
+    required Pokemon? pokemon,
+    required String label,
+    required String hint,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x0D202B3C),
+            blurRadius: 12,
+            offset: Offset(0, 5),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: const TextStyle(
+              color: Color(0xFF858B94),
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: controller,
+                  textInputAction: TextInputAction.search,
+                  onSubmitted: (_) => _loadPokemon(slot),
+                  decoration: InputDecoration(
+                    hintText: hint,
+                    isDense: true,
+                    filled: true,
+                    fillColor: const Color(0xFFF8F8FA),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(13),
+                      borderSide: BorderSide.none,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              IconButton.filled(
+                tooltip: 'Buscar $label',
+                onPressed: _loadingSlot == slot
+                    ? null
+                    : () => _loadPokemon(slot),
+                style: IconButton.styleFrom(
+                  backgroundColor: const Color(0xFFE94B4B),
+                ),
+                icon: _loadingSlot == slot
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Icon(Icons.search_rounded),
+              ),
+            ],
+          ),
+          if (pokemon != null) ...[
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Image.network(
+                  pokemon.imageUrl,
+                  width: 54,
+                  height: 54,
+                  errorBuilder: (context, error, stackTrace) => const Icon(
+                    Icons.catching_pokemon,
+                    size: 42,
+                    color: Color(0xFFE94B4B),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '#${pokemon.id.toString().padLeft(3, '0')}  ${_capitalize(pokemon.name)}',
+                        style: const TextStyle(
+                          color: Color(0xFF292D35),
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        pokemon.types.map(_capitalize).join(' • '),
+                        style: const TextStyle(
+                          color: Color(0xFF858B94),
+                          fontSize: 11,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildComparisonResults() {
+    final first = _first!;
+    final second = _second!;
+    const stats = [('HP', 'hp'), ('Ataque', 'attack'), ('Defesa', 'defense')];
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 18, 16, 16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(22),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x0D202B3C),
+            blurRadius: 12,
+            offset: Offset(0, 5),
+          ),
+        ],
+      ),
+      child: Column(
+        children: [
+          const Text(
+            'ATRIBUTOS BASE',
+            style: TextStyle(
+              color: Color(0xFF858B94),
+              fontSize: 10,
+              letterSpacing: 1.3,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 15),
+          for (final (label, key) in stats) ...[
+            _ComparisonStatRow(
+              label: label,
+              firstValue: first.stats[key] ?? 0,
+              secondValue: second.stats[key] ?? 0,
+            ),
+            if (key != 'defense') const Divider(height: 22),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _ComparisonStatRow extends StatelessWidget {
+  const _ComparisonStatRow({
+    required this.label,
+    required this.firstValue,
+    required this.secondValue,
+  });
+
+  final String label;
+  final int firstValue;
+  final int secondValue;
+
+  @override
+  Widget build(BuildContext context) {
+    const winner = Color(0xFF53A875);
+    const neutral = Color(0xFF292D35);
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            '$firstValue',
+            textAlign: TextAlign.left,
+            style: TextStyle(
+              color: firstValue > secondValue ? winner : neutral,
+              fontSize: 17,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ),
+        Expanded(
+          child: Text(
+            label,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              color: Color(0xFF737A84),
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+        Expanded(
+          child: Text(
+            '$secondValue',
+            textAlign: TextAlign.right,
+            style: TextStyle(
+              color: secondValue > firstValue ? winner : neutral,
+              fontSize: 17,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -1134,56 +1616,65 @@ class _NavItem extends StatelessWidget {
     required this.label,
     this.selected = false,
     this.badge,
+    this.onTap,
   });
 
   final IconData icon;
   final String label;
   final bool selected;
   final String? badge;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final color = selected ? const Color(0xFFE94B4B) : const Color(0xFFA4A9B1);
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Stack(
-          clipBehavior: Clip.none,
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 22, color: color),
-            if (badge != null)
-              Positioned(
-                right: -9,
-                top: -7,
-                child: Container(
-                  padding: const EdgeInsets.all(3),
-                  decoration: const BoxDecoration(
-                    color: Color(0xFFE94B4B),
-                    shape: BoxShape.circle,
-                  ),
-                  child: Text(
-                    badge!,
-                    style: const TextStyle(
-                      fontSize: 8,
-                      height: 1,
-                      color: Colors.white,
-                      fontWeight: FontWeight.w800,
+            Stack(
+              clipBehavior: Clip.none,
+              children: [
+                Icon(icon, size: 22, color: color),
+                if (badge != null)
+                  Positioned(
+                    right: -9,
+                    top: -7,
+                    child: Container(
+                      padding: const EdgeInsets.all(3),
+                      decoration: const BoxDecoration(
+                        color: Color(0xFFE94B4B),
+                        shape: BoxShape.circle,
+                      ),
+                      child: Text(
+                        badge!,
+                        style: const TextStyle(
+                          fontSize: 8,
+                          height: 1,
+                          color: Colors.white,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
                     ),
                   ),
-                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 9,
+                fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
+                color: color,
               ),
+            ),
           ],
         ),
-        const SizedBox(height: 4),
-        Text(
-          label,
-          style: TextStyle(
-            fontSize: 9,
-            fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
-            color: color,
-          ),
-        ),
-      ],
+      ),
     );
   }
 }
