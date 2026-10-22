@@ -112,12 +112,14 @@ class _PokedexHomePageState extends State<PokedexHomePage> {
   bool _hasMore = true;
   String? _error;
   int _offset = 0;
+  int _teamCount = 0;
 
   @override
   void initState() {
     super.initState();
     _api = widget.repository ?? PokeApiService(database: widget.database);
     _loadFavorites();
+    _loadTeamCount();
     _loadPage();
     _scrollController.addListener(_onScroll);
   }
@@ -134,7 +136,16 @@ class _PokedexHomePageState extends State<PokedexHomePage> {
     if (database == null) return;
     final favoriteIds = await database.getFavoriteIds();
     if (!mounted) return;
-    setState(() => _favorites.addAll(favoriteIds));
+    setState(() {
+      _favorites
+        ..clear()
+        ..addAll(favoriteIds);
+    });
+  }
+
+  Future<void> _loadTeamCount() async {
+    final team = await widget.database?.getTeam() ?? const <Pokemon>[];
+    if (mounted) setState(() => _teamCount = team.length);
   }
 
   void _onScroll() {
@@ -607,6 +618,16 @@ class _PokedexHomePageState extends State<PokedexHomePage> {
     );
   }
 
+  Future<void> _openTeam() async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => PokemonTeamPage(database: widget.database),
+      ),
+    );
+    await _loadFavorites();
+    await _loadTeamCount();
+  }
+
   Widget _buildBottomBar() {
     return Container(
       decoration: const BoxDecoration(
@@ -650,7 +671,8 @@ class _PokedexHomePageState extends State<PokedexHomePage> {
                 child: _NavItem(
                   icon: Icons.favorite_rounded,
                   label: 'Meu time',
-                  badge: _favorites.isEmpty ? null : '${_favorites.length}',
+                  onTap: _openTeam,
+                  badge: _teamCount == 0 ? null : '$_teamCount',
                 ),
               ),
             ],
@@ -1151,6 +1173,441 @@ class _ConfettiParticle {
   final Color color;
   final bool isCircle;
   final double rotation;
+}
+
+class PokemonTeamPage extends StatefulWidget {
+  const PokemonTeamPage({super.key, required this.database});
+
+  final PokedexDatabase? database;
+
+  @override
+  State<PokemonTeamPage> createState() => _PokemonTeamPageState();
+}
+
+class _PokemonTeamPageState extends State<PokemonTeamPage>
+    with SingleTickerProviderStateMixin {
+  late final TabController _tabController;
+  List<Pokemon> _favorites = [];
+  List<Pokemon> _team = [];
+  bool _isLoading = true;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _tabController = TabController(length: 2, vsync: this);
+    _loadCollections();
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadCollections() async {
+    final database = widget.database;
+    if (database == null) {
+      setState(() {
+        _isLoading = false;
+        _error = 'O armazenamento local não está disponível.';
+      });
+      return;
+    }
+
+    setState(() {
+      _isLoading = true;
+      _error = null;
+    });
+    try {
+      final values = await Future.wait([
+        database.getFavorites(),
+        database.getTeam(),
+      ]);
+      if (!mounted) return;
+      setState(() {
+        _favorites = values[0];
+        _team = values[1];
+        _isLoading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _error = 'Não foi possível carregar seus Pokémon salvos.';
+        _isLoading = false;
+      });
+    }
+  }
+
+  Future<void> _addToTeam(Pokemon pokemon) async {
+    final database = widget.database;
+    if (database == null) return;
+    try {
+      await database.addToTeam(pokemon);
+      await _loadCollections();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('${_capitalize(pokemon.name)} entrou no time!'),
+          ),
+        );
+      }
+    } on TeamLimitException {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Seu time já está completo com seis Pokémon.'),
+          ),
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Não foi possível salvar o time no SQLite.'),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _removeFromTeam(Pokemon pokemon) async {
+    final database = widget.database;
+    if (database == null) return;
+    try {
+      await database.removeFromTeam(pokemon.id);
+      await _loadCollections();
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Não foi possível atualizar o time.')),
+        );
+      }
+    }
+  }
+
+  Future<void> _removeFavorite(Pokemon pokemon) async {
+    final database = widget.database;
+    if (database == null) return;
+    try {
+      await database.toggleFavorite(pokemon);
+      await _loadCollections();
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Não foi possível atualizar os favoritos.'),
+          ),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFFFF9EF),
+      appBar: AppBar(
+        title: const Text(
+          'Meu time',
+          style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900),
+        ),
+        centerTitle: true,
+        backgroundColor: const Color(0xFFFFF9EF),
+        surfaceTintColor: Colors.transparent,
+        actions: [
+          IconButton(
+            tooltip: 'Atualizar coleções',
+            onPressed: _isLoading ? null : _loadCollections,
+            icon: const Icon(Icons.refresh_rounded),
+          ),
+        ],
+        bottom: TabBar(
+          controller: _tabController,
+          labelColor: const Color(0xFFE94B4B),
+          unselectedLabelColor: const Color(0xFF858B94),
+          indicatorColor: const Color(0xFFE94B4B),
+          tabs: [
+            Tab(text: 'Time ${_team.length}/6'),
+            Tab(text: 'Favoritos ${_favorites.length}'),
+          ],
+        ),
+      ),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : _error != null
+          ? _buildError()
+          : TabBarView(
+              controller: _tabController,
+              children: [_buildTeamTab(), _buildFavoritesTab()],
+            ),
+    );
+  }
+
+  Widget _buildTeamTab() {
+    if (_team.isEmpty) {
+      return _buildEmptyState(
+        icon: Icons.groups_rounded,
+        title: 'Seu time ainda está vazio',
+        description: 'Escolha seus Pokémon favoritos para montar uma equipe de até seis.',
+        buttonLabel: 'Ver favoritos',
+        onPressed: () => _tabController.animateTo(1),
+      );
+    }
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(20, 18, 20, 28),
+      children: [
+        Container(
+          padding: const EdgeInsets.all(18),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(22),
+            gradient: const LinearGradient(
+              colors: [Color(0xFFEF5A4F), Color(0xFFE63D55)],
+            ),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.groups_rounded, color: Colors.white, size: 34),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Sua equipe dos sonhos',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 17,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '${_team.length} de 6 Pokémon escolhidos',
+                      style: const TextStyle(
+                        color: Color(0xFFFFE9DE),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        for (var index = 0; index < _team.length; index++)
+          _buildPokemonTile(
+            pokemon: _team[index],
+            leading: Container(
+              width: 36,
+              height: 36,
+              alignment: Alignment.center,
+              decoration: const BoxDecoration(
+                color: Color(0xFFFFF0E8),
+                shape: BoxShape.circle,
+              ),
+              child: Text(
+                '${index + 1}',
+                style: const TextStyle(
+                  color: Color(0xFFE94B4B),
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ),
+            trailing: IconButton(
+              tooltip: 'Remover ${_capitalize(_team[index].name)} do time',
+              onPressed: () => _removeFromTeam(_team[index]),
+              icon: const Icon(
+                Icons.remove_circle_outline_rounded,
+                color: Color(0xFFE94B4B),
+              ),
+            ),
+          ),
+        if (_team.length < 6) ...[
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            onPressed: () => _tabController.animateTo(1),
+            icon: const Icon(Icons.add_rounded),
+            label: const Text('Adicionar dos favoritos'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: const Color(0xFFE94B4B),
+              padding: const EdgeInsets.symmetric(vertical: 14),
+              side: const BorderSide(color: Color(0xFFEFC7C0)),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildFavoritesTab() {
+    if (_favorites.isEmpty) {
+      return _buildEmptyState(
+        icon: Icons.favorite_border_rounded,
+        title: 'Nenhum favorito ainda',
+        description:
+            'Volte à Pokédex e toque no coração dos Pokémon que você gosta.',
+        buttonLabel: 'Voltar à Pokédex',
+        onPressed: () => Navigator.of(context).pop(),
+      );
+    }
+
+    return ListView.separated(
+      padding: const EdgeInsets.fromLTRB(20, 18, 20, 28),
+      itemCount: _favorites.length,
+      separatorBuilder: (_, _) => const SizedBox(height: 10),
+      itemBuilder: (context, index) {
+        final pokemon = _favorites[index];
+        final isInTeam = _team.any((member) => member.id == pokemon.id);
+        return _buildPokemonTile(
+          pokemon: pokemon,
+          leading: const Icon(Icons.favorite_rounded, color: Color(0xFFE94B4B)),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              IconButton(
+                tooltip: isInTeam
+                    ? '${_capitalize(pokemon.name)} já está no time'
+                    : _team.length >= 6
+                    ? 'Time completo'
+                    : 'Adicionar ${_capitalize(pokemon.name)} ao time',
+                onPressed: isInTeam || _team.length >= 6
+                    ? null
+                    : () => _addToTeam(pokemon),
+                icon: Icon(
+                  isInTeam
+                      ? Icons.check_circle_rounded
+                      : Icons.group_add_rounded,
+                  color: isInTeam
+                      ? const Color(0xFF49A96B)
+                      : const Color(0xFF5966B3),
+                ),
+              ),
+              IconButton(
+                tooltip: 'Remover ${_capitalize(pokemon.name)} dos favoritos',
+                onPressed: () => _removeFavorite(pokemon),
+                icon: const Icon(
+                  Icons.heart_broken_rounded,
+                  color: Color(0xFFE94B4B),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildPokemonTile({
+    required Pokemon pokemon,
+    required Widget leading,
+    required Widget trailing,
+  }) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+        leading: SizedBox(
+          width: 76,
+          height: 48,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(width: 26, height: 36, child: Center(child: leading)),
+              Image.network(
+                pokemon.imageUrl,
+                width: 46,
+                height: 46,
+                fit: BoxFit.contain,
+                errorBuilder: (_, _, _) => const Icon(
+                  Icons.catching_pokemon,
+                  color: Color(0xFFB9BEC6),
+                ),
+              ),
+            ],
+          ),
+        ),
+        title: Text(
+          _capitalize(pokemon.name),
+          style: const TextStyle(
+            fontWeight: FontWeight.w800,
+            color: Color(0xFF292D35),
+          ),
+        ),
+        subtitle: Text(
+          '#${pokemon.id.toString().padLeft(3, '0')} · ${pokemon.types.map(_capitalize).join(' / ')}',
+          style: const TextStyle(fontSize: 11, color: Color(0xFF858B94)),
+        ),
+        trailing: trailing,
+      ),
+    );
+  }
+
+  Widget _buildEmptyState({
+    required IconData icon,
+    required String title,
+    required String description,
+    required String buttonLabel,
+    required VoidCallback onPressed,
+  }) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(30),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 58, color: const Color(0xFFE6A5A0)),
+            const SizedBox(height: 14),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                fontSize: 19,
+                fontWeight: FontWeight.w900,
+                color: Color(0xFF292D35),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              description,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Color(0xFF858B94), height: 1.4),
+            ),
+            const SizedBox(height: 18),
+            FilledButton(onPressed: onPressed, child: Text(buttonLabel)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildError() => Center(
+    child: Padding(
+      padding: const EdgeInsets.all(30),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(
+            Icons.error_outline_rounded,
+            color: Color(0xFFE94B4B),
+            size: 42,
+          ),
+          const SizedBox(height: 12),
+          Text(_error!, textAlign: TextAlign.center),
+          const SizedBox(height: 12),
+          FilledButton(
+            onPressed: _loadCollections,
+            child: const Text('Tentar novamente'),
+          ),
+        ],
+      ),
+    ),
+  );
 }
 
 class PokemonCard extends StatelessWidget {
