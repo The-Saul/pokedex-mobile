@@ -28,9 +28,10 @@ class PokedexDatabase {
         : path.join(await getDatabasesPath(), databaseName);
     final database = await openDatabase(
       databasePath,
-      version: 1,
+      version: 2,
       onConfigure: _configure,
       onCreate: _createSchema,
+      onUpgrade: _upgradeSchema,
     );
     return _instance = PokedexDatabase._(database);
   }
@@ -40,9 +41,10 @@ class PokedexDatabase {
     final database = await factory.openDatabase(
       inMemoryDatabasePath,
       options: OpenDatabaseOptions(
-        version: 1,
+        version: 2,
         onConfigure: _configure,
         onCreate: _createSchema,
+        onUpgrade: _upgradeSchema,
       ),
     );
     return PokedexDatabase._(database);
@@ -52,6 +54,18 @@ class PokedexDatabase {
     await database.execute('PRAGMA foreign_keys = ON');
   }
 
+  static Future<void> _upgradeSchema(
+    Database database,
+    int oldVersion,
+    int newVersion,
+  ) async {
+    if (oldVersion < 2) {
+      await database.execute(
+        "ALTER TABLE pokemon ADD COLUMN abilities_json TEXT NOT NULL DEFAULT '[]'",
+      );
+    }
+  }
+
   static Future<void> _createSchema(Database database, int version) async {
     await database.execute('''
       CREATE TABLE pokemon (
@@ -59,6 +73,7 @@ class PokedexDatabase {
         name TEXT NOT NULL,
         types_json TEXT NOT NULL,
         stats_json TEXT NOT NULL,
+        abilities_json TEXT NOT NULL DEFAULT '[]',
         updated_at INTEGER NOT NULL
       )
     ''');
@@ -261,6 +276,9 @@ class PokedexDatabase {
     'name': pokemon.name,
     'types_json': jsonEncode(pokemon.types),
     'stats_json': jsonEncode(pokemon.stats),
+    'abilities_json': jsonEncode(
+      pokemon.abilities.map((ability) => ability.toJson()).toList(),
+    ),
     'updated_at': DateTime.now().millisecondsSinceEpoch,
   };
 
@@ -271,6 +289,13 @@ class PokedexDatabase {
         .cast<String>(),
     stats: (jsonDecode(row['stats_json'] as String) as Map<String, dynamic>)
         .map((key, value) => MapEntry(key, value as int)),
+    abilities: (jsonDecode(row['abilities_json'] as String) as List<dynamic>)
+        .map(
+          (ability) => PokemonAbility.fromJson(
+            Map<String, dynamic>.from(ability as Map),
+          ),
+        )
+        .toList(),
   );
 }
 
