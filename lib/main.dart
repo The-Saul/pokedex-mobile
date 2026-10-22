@@ -1,0 +1,877 @@
+import 'dart:convert';
+
+import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+
+void main() {
+  runApp(const PokedexApp());
+}
+
+class PokedexApp extends StatelessWidget {
+  const PokedexApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Pokédex de Bolso',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        useMaterial3: true,
+        scaffoldBackgroundColor: const Color(0xFFFFF9EF),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFFE94B4B),
+          surface: const Color(0xFFFFF9EF),
+        ),
+        fontFamily: 'Roboto',
+      ),
+      home: const PokedexHomePage(),
+    );
+  }
+}
+
+class Pokemon {
+  const Pokemon({required this.id, required this.name, required this.types});
+
+  final int id;
+  final String name;
+  final List<String> types;
+
+  String get imageUrl =>
+      'https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/$id.png';
+
+  factory Pokemon.fromJson(Map<String, dynamic> json) {
+    final types = (json['types'] as List<dynamic>? ?? const [])
+        .map((item) => item['type']['name'] as String)
+        .toList();
+
+    return Pokemon(
+      id: json['id'] as int,
+      name: json['name'] as String,
+      types: types,
+    );
+  }
+}
+
+abstract interface class PokemonRepository {
+  Future<List<Pokemon>> getPage({required int offset, int limit = 20});
+  Future<Pokemon> search(String query);
+}
+
+class PokeApiService implements PokemonRepository {
+  static const _baseUrl = 'https://pokeapi.co/api/v2';
+  final Map<String, Pokemon> _cache = {};
+
+  @override
+  Future<List<Pokemon>> getPage({required int offset, int limit = 20}) async {
+    final response = await http.get(
+      Uri.parse('$_baseUrl/pokemon?limit=$limit&offset=$offset'),
+    );
+    if (response.statusCode != 200) {
+      throw const FormatException('Não foi possível carregar a Pokédex.');
+    }
+
+    final results = jsonDecode(response.body)['results'] as List<dynamic>;
+    return Future.wait(
+      results.map((item) => _getPokemon(item['name'] as String)),
+    );
+  }
+
+  @override
+  Future<Pokemon> search(String query) =>
+      _getPokemon(query.toLowerCase().trim());
+
+  Future<Pokemon> _getPokemon(String name) async {
+    if (_cache.containsKey(name)) return _cache[name]!;
+
+    final response = await http.get(Uri.parse('$_baseUrl/pokemon/$name'));
+    if (response.statusCode == 404) {
+      throw const FormatException(
+        'Pokémon não encontrado. Confira o nome ou número.',
+      );
+    }
+    if (response.statusCode != 200) {
+      throw const FormatException('Não foi possível carregar este Pokémon.');
+    }
+
+    final pokemon = Pokemon.fromJson(jsonDecode(response.body));
+    _cache[pokemon.name] = pokemon;
+    return pokemon;
+  }
+}
+
+class PokedexHomePage extends StatefulWidget {
+  const PokedexHomePage({super.key, this.repository});
+
+  final PokemonRepository? repository;
+
+  @override
+  State<PokedexHomePage> createState() => _PokedexHomePageState();
+}
+
+class _PokedexHomePageState extends State<PokedexHomePage> {
+  late final PokemonRepository _api;
+  final _scrollController = ScrollController();
+  final _searchController = TextEditingController();
+  final List<Pokemon> _pokemon = [];
+  final Set<int> _favorites = {};
+  bool _isLoading = true;
+  bool _isLoadingMore = false;
+  bool _isSearchMode = false;
+  bool _hasMore = true;
+  String? _error;
+  int _offset = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _api = widget.repository ?? PokeApiService();
+    _loadPage();
+    _scrollController.addListener(_onScroll);
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  void _onScroll() {
+    if (_isSearchMode ||
+        !_hasMore ||
+        _isLoading ||
+        _isLoadingMore ||
+        _error != null) {
+      return;
+    }
+    if (_scrollController.position.extentAfter < 360) {
+      _loadPage(loadMore: true);
+    }
+  }
+
+  Future<void> _loadPage({bool loadMore = false}) async {
+    if (loadMore) {
+      setState(() => _isLoadingMore = true);
+    } else {
+      setState(() {
+        _isLoading = true;
+        _error = null;
+      });
+    }
+
+    try {
+      final page = await _api.getPage(offset: loadMore ? _offset : 0);
+      if (!mounted) return;
+      setState(() {
+        if (!loadMore) _pokemon.clear();
+        _pokemon.addAll(page);
+        _offset = (loadMore ? _offset : 0) + page.length;
+        _hasMore = page.length == 20;
+        _isLoading = false;
+        _isLoadingMore = false;
+        _error = null;
+      });
+    } on FormatException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _error = error.message;
+        _isLoading = false;
+        _isLoadingMore = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _error = 'Sem conexão no momento. Tente novamente.';
+        _isLoading = false;
+        _isLoadingMore = false;
+      });
+    }
+  }
+
+  Future<void> _search() async {
+    final query = _searchController.text.trim();
+    if (query.isEmpty) {
+      _clearSearch();
+      return;
+    }
+
+    setState(() {
+      _isLoading = true;
+      _error = null;
+      _isSearchMode = true;
+    });
+    try {
+      final result = await _api.search(query);
+      if (!mounted) return;
+      setState(() {
+        _pokemon
+          ..clear()
+          ..add(result);
+        _isLoading = false;
+      });
+    } on FormatException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _pokemon.clear();
+        _error = error.message;
+        _isLoading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _error = 'Sem conexão no momento. Tente novamente.';
+        _isLoading = false;
+      });
+    }
+  }
+
+  void _clearSearch() {
+    _searchController.clear();
+    setState(() {
+      _isSearchMode = false;
+      _hasMore = true;
+      _error = null;
+      _offset = 0;
+    });
+    _loadPage();
+  }
+
+  void _toggleFavorite(Pokemon pokemon) {
+    setState(() {
+      if (!_favorites.add(pokemon.id)) _favorites.remove(pokemon.id);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: SafeArea(
+        child: CustomScrollView(
+          controller: _scrollController,
+          slivers: [
+            SliverToBoxAdapter(child: _buildHeader()),
+            SliverToBoxAdapter(child: _buildSearchField()),
+            SliverToBoxAdapter(child: _buildHero()),
+            SliverToBoxAdapter(child: _buildSectionTitle()),
+            if (_isLoading && _pokemon.isEmpty)
+              const SliverFillRemaining(
+                hasScrollBody: false,
+                child: Center(child: CircularProgressIndicator()),
+              )
+            else if (_error != null && _pokemon.isEmpty)
+              SliverFillRemaining(hasScrollBody: false, child: _buildError())
+            else if (_pokemon.isEmpty)
+              const SliverFillRemaining(
+                hasScrollBody: false,
+                child: Center(child: Text('Nenhum Pokémon encontrado.')),
+              )
+            else ...[
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+                sliver: SliverGrid.builder(
+                  itemCount: _pokemon.length,
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 2,
+                    mainAxisSpacing: 14,
+                    crossAxisSpacing: 14,
+                    childAspectRatio: 0.78,
+                  ),
+                  itemBuilder: (context, index) {
+                    final pokemon = _pokemon[index];
+                    return PokemonCard(
+                      pokemon: pokemon,
+                      isFavorite: _favorites.contains(pokemon.id),
+                      onFavoriteTap: () => _toggleFavorite(pokemon),
+                    );
+                  },
+                ),
+              ),
+              if (_isLoadingMore)
+                const SliverToBoxAdapter(
+                  child: Padding(
+                    padding: EdgeInsets.all(20),
+                    child: Center(child: CircularProgressIndicator()),
+                  ),
+                ),
+            ],
+            const SliverToBoxAdapter(child: SizedBox(height: 28)),
+          ],
+        ),
+      ),
+      bottomNavigationBar: _buildBottomBar(),
+    );
+  }
+
+  Widget _buildHeader() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 18, 20, 18),
+      child: Row(
+        children: [
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              color: const Color(0xFFE94B4B),
+              borderRadius: BorderRadius.circular(15),
+              boxShadow: const [
+                BoxShadow(
+                  color: Color(0x33E94B4B),
+                  blurRadius: 12,
+                  offset: Offset(0, 5),
+                ),
+              ],
+            ),
+            child: const Icon(
+              Icons.catching_pokemon,
+              color: Colors.white,
+              size: 28,
+            ),
+          ),
+          const SizedBox(width: 12),
+          const Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'POKÉDEX',
+                  style: TextStyle(
+                    fontSize: 12,
+                    letterSpacing: 2.2,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFFE94B4B),
+                  ),
+                ),
+                SizedBox(height: 2),
+                Text(
+                  'de bolso',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFF292D35),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Container(
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: IconButton(
+              tooltip: 'Atualizar lista',
+              onPressed: _isLoading ? null : () => _loadPage(),
+              icon: const Icon(Icons.refresh_rounded, color: Color(0xFF555D68)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHero() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      child: Container(
+        height: 168,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(26),
+          gradient: const LinearGradient(
+            colors: [Color(0xFFEF5A4F), Color(0xFFE63D55)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x33E94B4B),
+              blurRadius: 18,
+              offset: Offset(0, 9),
+            ),
+          ],
+        ),
+        child: Stack(
+          children: [
+            Positioned(
+              right: -16,
+              bottom: -42,
+              child: Icon(
+                Icons.catching_pokemon,
+                size: 190,
+                color: Colors.white.withValues(alpha: 0.13),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(22, 21, 20, 18),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 5,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.2),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: const Text(
+                      'SUA AVENTURA COMEÇA AQUI',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 9,
+                        letterSpacing: 1,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  const Spacer(),
+                  const Text(
+                    'Encontre seu\npróximo parceiro!',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 23,
+                      height: 1.12,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Explore o mundo Pokémon',
+                    style: TextStyle(
+                      color: Color(0xFFFFE9DE),
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSearchField() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 18),
+      child: TextField(
+        controller: _searchController,
+        textInputAction: TextInputAction.search,
+        onSubmitted: (_) => _search(),
+        decoration: InputDecoration(
+          hintText: 'Buscar por nome ou número',
+          hintStyle: const TextStyle(color: Color(0xFFA5AAB1), fontSize: 13),
+          prefixIcon: const Icon(
+            Icons.search_rounded,
+            color: Color(0xFFE94B4B),
+          ),
+          suffixIcon: IconButton(
+            tooltip: 'Buscar Pokémon',
+            onPressed: _search,
+            icon: const Icon(
+              Icons.arrow_forward_rounded,
+              color: Color(0xFFE94B4B),
+            ),
+          ),
+          filled: true,
+          fillColor: Colors.white,
+          contentPadding: const EdgeInsets.symmetric(vertical: 15),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(16),
+            borderSide: BorderSide.none,
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(16),
+            borderSide: BorderSide.none,
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(16),
+            borderSide: const BorderSide(color: Color(0xFFE94B4B), width: 1.2),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSectionTitle() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 25, 20, 14),
+      child: Row(
+        children: [
+          const Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Pokémon',
+                  style: TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.w900,
+                    color: Color(0xFF292D35),
+                  ),
+                ),
+                SizedBox(height: 3),
+                Text(
+                  'Toque em um card para favoritar',
+                  style: TextStyle(fontSize: 12, color: Color(0xFF858B94)),
+                ),
+              ],
+            ),
+          ),
+          if (_isSearchMode)
+            TextButton.icon(
+              onPressed: _clearSearch,
+              icon: const Icon(Icons.close_rounded, size: 17),
+              label: const Text('Limpar'),
+              style: TextButton.styleFrom(
+                foregroundColor: const Color(0xFFE94B4B),
+              ),
+            )
+          else
+            Text(
+              '${_favorites.length} ♡',
+              style: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w800,
+                color: Color(0xFFE94B4B),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildError() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(30),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(
+              Icons.wifi_off_rounded,
+              size: 42,
+              color: Color(0xFFADB2B9),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              _error ?? 'Algo deu errado.',
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Color(0xFF666D77)),
+            ),
+            const SizedBox(height: 12),
+            FilledButton(
+              onPressed: _isSearchMode ? _search : () => _loadPage(),
+              child: const Text('Tentar novamente'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBottomBar() {
+    return Container(
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        boxShadow: [
+          BoxShadow(
+            color: Color(0x10000000),
+            blurRadius: 14,
+            offset: Offset(0, -4),
+          ),
+        ],
+      ),
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
+          child: Row(
+            children: [
+              const Expanded(
+                child: _NavItem(
+                  icon: Icons.grid_view_rounded,
+                  label: 'Pokédex',
+                  selected: true,
+                ),
+              ),
+              const Expanded(
+                child: _NavItem(
+                  icon: Icons.compare_arrows_rounded,
+                  label: 'Comparar',
+                ),
+              ),
+              const Expanded(
+                child: _NavItem(
+                  icon: Icons.help_outline_rounded,
+                  label: 'Quiz',
+                ),
+              ),
+              Expanded(
+                child: _NavItem(
+                  icon: Icons.favorite_rounded,
+                  label: 'Meu time',
+                  badge: _favorites.isEmpty ? null : '${_favorites.length}',
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class PokemonCard extends StatelessWidget {
+  const PokemonCard({
+    super.key,
+    required this.pokemon,
+    required this.isFavorite,
+    required this.onFavoriteTap,
+  });
+
+  final Pokemon pokemon;
+  final bool isFavorite;
+  final VoidCallback onFavoriteTap;
+
+  static const _typeColors = <String, Color>{
+    'grass': Color(0xFF64BC76),
+    'fire': Color(0xFFF18A55),
+    'water': Color(0xFF63A6E8),
+    'bug': Color(0xFF9AB84B),
+    'normal': Color(0xFFA6A5A0),
+    'poison': Color(0xFFA76BC1),
+    'electric': Color(0xFFE8BD42),
+    'ground': Color(0xFFC69B65),
+    'fairy': Color(0xFFE58EB2),
+    'fighting': Color(0xFFD76B61),
+    'psychic': Color(0xFFE87892),
+    'rock': Color(0xFFA99A67),
+    'ghost': Color(0xFF7774AE),
+    'ice': Color(0xFF73C7C5),
+    'dragon': Color(0xFF7765CE),
+    'dark': Color(0xFF74665E),
+    'steel': Color(0xFF8B9BA8),
+    'flying': Color(0xFF8D9FE0),
+  };
+
+  Color get _color =>
+      _typeColors[pokemon.types.firstOrNull] ?? const Color(0xFF63A6E8);
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(22),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x0D202B3C),
+            blurRadius: 14,
+            offset: Offset(0, 6),
+          ),
+        ],
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(22),
+        child: Stack(
+          children: [
+            Positioned(
+              right: -24,
+              top: 35,
+              child: Icon(
+                Icons.catching_pokemon,
+                size: 132,
+                color: _color.withValues(alpha: 0.09),
+              ),
+            ),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(7, 8, 7, 0),
+                    child: Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        Container(
+                          width: 112,
+                          height: 112,
+                          decoration: BoxDecoration(
+                            color: _color.withValues(alpha: 0.12),
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                        Image.network(
+                          pokemon.imageUrl,
+                          fit: BoxFit.contain,
+                          errorBuilder: (context, error, stackTrace) => Icon(
+                            Icons.catching_pokemon,
+                            size: 78,
+                            color: _color,
+                          ),
+                          loadingBuilder: (context, child, progress) =>
+                              progress == null
+                              ? child
+                              : SizedBox(
+                                  width: 30,
+                                  height: 30,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: _color,
+                                  ),
+                                ),
+                        ),
+                        Positioned(
+                          top: 3,
+                          right: 1,
+                          child: IconButton(
+                            visualDensity: VisualDensity.compact,
+                            onPressed: onFavoriteTap,
+                            tooltip: isFavorite
+                                ? 'Remover dos favoritos'
+                                : 'Adicionar aos favoritos',
+                            icon: Icon(
+                              isFavorite
+                                  ? Icons.favorite_rounded
+                                  : Icons.favorite_border_rounded,
+                              color: isFavorite
+                                  ? const Color(0xFFE94B4B)
+                                  : const Color(0xFFB5BAC1),
+                              size: 21,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(14, 4, 14, 14),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '#${pokemon.id.toString().padLeft(3, '0')}',
+                        style: TextStyle(
+                          fontSize: 10,
+                          letterSpacing: 1,
+                          fontWeight: FontWeight.w800,
+                          color: _color,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        _capitalize(pokemon.name),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w900,
+                          color: Color(0xFF292D35),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 5,
+                        runSpacing: 4,
+                        children: pokemon.types
+                            .take(2)
+                            .map(
+                              (type) => Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 4,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: (_typeColors[type] ?? _color)
+                                      .withValues(alpha: 0.13),
+                                  borderRadius: BorderRadius.circular(20),
+                                ),
+                                child: Text(
+                                  _capitalize(type),
+                                  style: TextStyle(
+                                    fontSize: 9,
+                                    fontWeight: FontWeight.w700,
+                                    color: _typeColors[type] ?? _color,
+                                  ),
+                                ),
+                              ),
+                            )
+                            .toList(),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _NavItem extends StatelessWidget {
+  const _NavItem({
+    required this.icon,
+    required this.label,
+    this.selected = false,
+    this.badge,
+  });
+
+  final IconData icon;
+  final String label;
+  final bool selected;
+  final String? badge;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = selected ? const Color(0xFFE94B4B) : const Color(0xFFA4A9B1);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Stack(
+          clipBehavior: Clip.none,
+          children: [
+            Icon(icon, size: 22, color: color),
+            if (badge != null)
+              Positioned(
+                right: -9,
+                top: -7,
+                child: Container(
+                  padding: const EdgeInsets.all(3),
+                  decoration: const BoxDecoration(
+                    color: Color(0xFFE94B4B),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Text(
+                    badge!,
+                    style: const TextStyle(
+                      fontSize: 8,
+                      height: 1,
+                      color: Colors.white,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 9,
+            fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
+            color: color,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+String _capitalize(String value) =>
+    value.isEmpty ? value : '${value[0].toUpperCase()}${value.substring(1)}';
