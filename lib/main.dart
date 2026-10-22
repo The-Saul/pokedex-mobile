@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
 import 'data/pokedex_database.dart';
+import 'data/type_effectiveness.dart';
 import 'models/pokemon.dart';
 
 export 'models/pokemon.dart';
@@ -2182,11 +2183,130 @@ class _PokemonComparePageState extends State<PokemonComparePage> {
     final first = _first!;
     final second = _second!;
     const stats = [('HP', 'hp'), ('Ataque', 'attack'), ('Defesa', 'defense')];
+    final firstScore = _comparisonScore(first);
+    final secondScore = _comparisonScore(second);
+    final winner = firstScore == secondScore
+        ? null
+        : firstScore > secondScore
+        ? first
+        : second;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Container(
+          padding: const EdgeInsets.fromLTRB(16, 18, 16, 16),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(22),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x0D202B3C),
+                blurRadius: 12,
+                offset: Offset(0, 5),
+              ),
+            ],
+          ),
+          child: Column(
+            children: [
+              const Text(
+                'ATRIBUTOS BASE',
+                style: TextStyle(
+                  color: Color(0xFF858B94),
+                  fontSize: 10,
+                  letterSpacing: 1.3,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 15),
+              for (final (label, key) in stats) ...[
+                _ComparisonStatRow(
+                  label: label,
+                  firstValue: first.stats[key] ?? 0,
+                  secondValue: second.stats[key] ?? 0,
+                ),
+                if (key != 'defense') const Divider(height: 22),
+              ],
+            ],
+          ),
+        ),
+        const SizedBox(height: 14),
+        _buildTypeMatchupCard(attacker: first, defender: second),
+        const SizedBox(height: 10),
+        _buildTypeMatchupCard(attacker: second, defender: first),
+        const SizedBox(height: 14),
+        Container(
+          padding: const EdgeInsets.all(18),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(22),
+            gradient: const LinearGradient(
+              colors: [Color(0xFF3A9D72), Color(0xFF58B987)],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+          ),
+          child: Column(
+            children: [
+              Icon(
+                winner == null
+                    ? Icons.balance_rounded
+                    : Icons.emoji_events_rounded,
+                color: Colors.white,
+                size: 30,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                winner == null
+                    ? 'Empate técnico!'
+                    : '${_capitalize(winner.name)} leva a melhor!',
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 19,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                '${_capitalize(first.name)}: $firstScore  •  ${_capitalize(second.name)}: $secondScore',
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: Color(0xFFE8FFF1),
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                'Resultado pela soma de HP, ataque e defesa.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Color(0xFFD6F6E3), fontSize: 10),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  int _comparisonScore(Pokemon pokemon) =>
+      (pokemon.stats['hp'] ?? 0) +
+      (pokemon.stats['attack'] ?? 0) +
+      (pokemon.stats['defense'] ?? 0);
+
+  Widget _buildTypeMatchupCard({
+    required Pokemon attacker,
+    required Pokemon defender,
+  }) {
+    final matchups = TypeEffectiveness.forPokemon(attacker, defender);
+    final strongest = matchups.isEmpty ? null : matchups.first;
+    final hasAdvantage = strongest != null && strongest.multiplier > 1;
+
     return Container(
-      padding: const EdgeInsets.fromLTRB(16, 18, 16, 16),
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(22),
+        borderRadius: BorderRadius.circular(20),
         boxShadow: const [
           BoxShadow(
             color: Color(0x0D202B3C),
@@ -2196,28 +2316,101 @@ class _PokemonComparePageState extends State<PokemonComparePage> {
         ],
       ),
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'ATRIBUTOS BASE',
-            style: TextStyle(
-              color: Color(0xFF858B94),
-              fontSize: 10,
-              letterSpacing: 1.3,
-              fontWeight: FontWeight.w800,
+          Text(
+            '${_capitalize(attacker.name)} contra ${_capitalize(defender.name)}',
+            style: const TextStyle(
+              color: Color(0xFF292D35),
+              fontSize: 13,
+              fontWeight: FontWeight.w900,
             ),
           ),
-          const SizedBox(height: 15),
-          for (final (label, key) in stats) ...[
-            _ComparisonStatRow(
-              label: label,
-              firstValue: first.stats[key] ?? 0,
-              secondValue: second.stats[key] ?? 0,
+          const SizedBox(height: 4),
+          const Text(
+            'Efetividade dos tipos de ataque',
+            style: TextStyle(color: Color(0xFF858B94), fontSize: 10),
+          ),
+          const SizedBox(height: 12),
+          if (matchups.isEmpty)
+            const Text(
+              'Tipos indisponíveis para calcular a efetividade.',
+              style: TextStyle(color: Color(0xFF858B94), fontSize: 11),
+            )
+          else ...[
+            for (final matchup in matchups)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 9,
+                      height: 9,
+                      decoration: BoxDecoration(
+                        color:
+                            PokemonCard._typeColors[matchup.type] ??
+                            const Color(0xFF858B94),
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        _capitalize(matchup.type),
+                        style: const TextStyle(
+                          color: Color(0xFF505762),
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    Text(
+                      _effectivenessLabel(matchup.multiplier),
+                      style: TextStyle(
+                        color: _effectivenessColor(matchup.multiplier),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            const SizedBox(height: 5),
+            Text(
+              hasAdvantage
+                  ? 'Maior vantagem: ${_capitalize(strongest.type)} ${_multiplierText(strongest.multiplier)} contra ${defender.types.map(_capitalize).join(' / ')}.'
+                  : 'Nenhum tipo deste Pokémon é super efetivo contra ${_capitalize(defender.name)}.',
+              style: TextStyle(
+                color: hasAdvantage
+                    ? const Color(0xFF368B55)
+                    : const Color(0xFF737A84),
+                fontSize: 10,
+                height: 1.35,
+                fontWeight: FontWeight.w700,
+              ),
             ),
-            if (key != 'defense') const Divider(height: 22),
           ],
         ],
       ),
     );
+  }
+
+  String _effectivenessLabel(double multiplier) {
+    if (multiplier == 0) return 'Sem efeito ×0';
+    if (multiplier >= 2) {
+      return 'Super efetivo ${_multiplierText(multiplier)}';
+    }
+    if (multiplier < 1) return 'Pouco efetivo ${_multiplierText(multiplier)}';
+    return 'Neutro ×1';
+  }
+
+  String _multiplierText(double multiplier) =>
+      '×${multiplier == multiplier.roundToDouble() ? multiplier.toInt() : multiplier}';
+
+  Color _effectivenessColor(double multiplier) {
+    if (multiplier == 0 || multiplier < 1) return const Color(0xFF777F89);
+    if (multiplier >= 2) return const Color(0xFF368B55);
+    return const Color(0xFF737A84);
   }
 }
 
