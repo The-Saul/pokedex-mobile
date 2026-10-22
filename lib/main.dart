@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -597,6 +598,15 @@ class _PokedexHomePageState extends State<PokedexHomePage> {
     );
   }
 
+  void _openQuiz() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) =>
+            PokemonQuizPage(repository: _api, database: widget.database),
+      ),
+    );
+  }
+
   Widget _buildBottomBar() {
     return Container(
       decoration: const BoxDecoration(
@@ -629,10 +639,11 @@ class _PokedexHomePageState extends State<PokedexHomePage> {
                   onTap: _openComparator,
                 ),
               ),
-              const Expanded(
+              Expanded(
                 child: _NavItem(
                   icon: Icons.help_outline_rounded,
                   label: 'Quiz',
+                  onTap: _openQuiz,
                 ),
               ),
               Expanded(
@@ -648,6 +659,498 @@ class _PokedexHomePageState extends State<PokedexHomePage> {
       ),
     );
   }
+}
+
+class PokemonQuizPage extends StatefulWidget {
+  PokemonQuizPage({
+    super.key,
+    required this.repository,
+    required this.database,
+    Random? random,
+  }) : random = random ?? Random();
+
+  final PokemonRepository repository;
+  final PokedexDatabase? database;
+  final Random random;
+
+  @override
+  State<PokemonQuizPage> createState() => _PokemonQuizPageState();
+}
+
+class _PokemonQuizPageState extends State<PokemonQuizPage>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _confettiController;
+  Pokemon? _answer;
+  List<Pokemon> _choices = [];
+  String? _selectedName;
+  List<QuizAttempt> _history = [];
+  bool _isLoading = true;
+  bool _isSaving = false;
+  String? _error;
+
+  int get _correctAnswers =>
+      _history.where((attempt) => attempt.isCorrect).length;
+
+  @override
+  void initState() {
+    super.initState();
+    _confettiController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1900),
+    );
+    _loadHistory();
+    _loadRound();
+  }
+
+  @override
+  void dispose() {
+    _confettiController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadHistory() async {
+    final history = await widget.database?.getQuizHistory() ?? const [];
+    if (mounted) setState(() => _history = history);
+  }
+
+  Future<void> _loadRound() async {
+    setState(() {
+      _isLoading = true;
+      _selectedName = null;
+      _error = null;
+    });
+    try {
+      final answerId = widget.random.nextInt(151) + 1;
+      final ids = <int>{answerId};
+      while (ids.length < 4) {
+        ids.add(widget.random.nextInt(151) + 1);
+      }
+      final pokemon = await Future.wait(
+        ids.map((id) => widget.repository.search('$id')),
+      );
+      pokemon.shuffle(widget.random);
+      if (!mounted) return;
+      setState(() {
+        _answer = pokemon.firstWhere((item) => item.id == answerId);
+        _choices = pokemon;
+        _isLoading = false;
+      });
+    } on FormatException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _error = error.message;
+        _isLoading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _error = 'Não foi possível carregar o desafio. Confira sua conexão.';
+        _isLoading = false;
+      });
+    }
+  }
+
+  Future<void> _submitGuess(Pokemon choice) async {
+    final answer = _answer;
+    if (answer == null || _selectedName != null || _isSaving) return;
+    setState(() {
+      _selectedName = choice.name;
+      _isSaving = true;
+    });
+    if (choice.id == answer.id) {
+      _confettiController.forward(from: 0);
+    }
+    try {
+      await widget.database?.saveQuizAttempt(
+        answer: answer,
+        guess: choice.name,
+      );
+      await _loadHistory();
+    } catch (_) {
+      if (mounted) {
+        setState(
+          () => _error =
+              'Resposta conferida, mas não foi possível salvá-la no SQLite.',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSaving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final answer = _answer;
+    final answered = _selectedName != null;
+    return Scaffold(
+      backgroundColor: const Color(0xFFFFF9EF),
+      appBar: AppBar(
+        title: const Text(
+          'Quem é esse Pokémon?',
+          style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800),
+        ),
+        centerTitle: true,
+        backgroundColor: const Color(0xFFFFF9EF),
+        surfaceTintColor: Colors.transparent,
+      ),
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 28),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(18),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(24),
+                    gradient: const LinearGradient(
+                      colors: [Color(0xFF315FA8), Color(0xFF4787D4)],
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(
+                        Icons.quiz_rounded,
+                        color: Colors.white,
+                        size: 34,
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'Adivinhe pela silhueta',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 18,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              'Acertos: $_correctAnswers de ${_history.length}',
+                              style: const TextStyle(
+                                color: Color(0xFFDDEBFF),
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 18),
+                Container(
+                  height: 260,
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(24),
+                  ),
+                  child: Center(
+                    child: _isLoading
+                        ? const CircularProgressIndicator()
+                        : _error != null && answer == null
+                        ? Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(
+                                Icons.wifi_off_rounded,
+                                color: Color(0xFF858B94),
+                                size: 38,
+                              ),
+                              const SizedBox(height: 10),
+                              Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 20,
+                                ),
+                                child: Text(
+                                  _error!,
+                                  textAlign: TextAlign.center,
+                                ),
+                              ),
+                              const SizedBox(height: 10),
+                              FilledButton(
+                                onPressed: _loadRound,
+                                child: const Text('Tentar novamente'),
+                              ),
+                            ],
+                          )
+                        : answer == null
+                        ? const SizedBox.shrink()
+                        : Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              ColorFiltered(
+                                colorFilter: answered
+                                    ? const ColorFilter.mode(
+                                        Colors.transparent,
+                                        BlendMode.dst,
+                                      )
+                                    : const ColorFilter.mode(
+                                        Colors.black,
+                                        BlendMode.srcIn,
+                                      ),
+                                child: Image.network(
+                                  answer.imageUrl,
+                                  height: 190,
+                                  width: 190,
+                                  fit: BoxFit.contain,
+                                  errorBuilder: (_, _, _) => const Icon(
+                                    Icons.catching_pokemon,
+                                    size: 150,
+                                    color: Color(0xFFE94B4B),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                answered
+                                    ? _capitalize(answer.name)
+                                    : 'Quem é esse Pokémon?',
+                                style: const TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w800,
+                                  color: Color(0xFF292D35),
+                                ),
+                              ),
+                            ],
+                          ),
+                  ),
+                ),
+                const SizedBox(height: 18),
+                for (final choice in _choices)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: OutlinedButton(
+                      onPressed: answered || _isLoading
+                          ? null
+                          : () => _submitGuess(choice),
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 15,
+                        ),
+                        alignment: Alignment.centerLeft,
+                        backgroundColor: answered && choice.name == answer?.name
+                            ? const Color(0xFFE2F4E8)
+                            : answered && choice.name == _selectedName
+                            ? const Color(0xFFFFE5E1)
+                            : Colors.white,
+                        side: BorderSide(
+                          color: answered && choice.name == answer?.name
+                              ? const Color(0xFF49A96B)
+                              : const Color(0xFFE8E8E8),
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(15),
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              _capitalize(choice.name),
+                              style: const TextStyle(
+                                color: Color(0xFF292D35),
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                          if (answered && choice.name == answer?.name)
+                            const Icon(
+                              Icons.check_circle_rounded,
+                              color: Color(0xFF49A96B),
+                            ),
+                          if (answered &&
+                              choice.name == _selectedName &&
+                              choice.name != answer?.name)
+                            const Icon(
+                              Icons.cancel_rounded,
+                              color: Color(0xFFE94B4B),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                if (answered) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    _selectedName == answer?.name
+                        ? 'Isso aí! Resposta correta!'
+                        : 'Quase! A resposta era ${_capitalize(answer!.name)}.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontWeight: FontWeight.w800,
+                      color: _selectedName == answer?.name
+                          ? const Color(0xFF368B55)
+                          : const Color(0xFFE94B4B),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  FilledButton.icon(
+                    onPressed: _isSaving ? null : _loadRound,
+                    icon: const Icon(Icons.refresh_rounded),
+                    label: const Text('Próximo Pokémon'),
+                  ),
+                ],
+                if (_error != null && answer != null) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    _error!,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Color(0xFFE94B4B)),
+                  ),
+                ],
+                if (_history.isNotEmpty) ...[
+                  const SizedBox(height: 25),
+                  const Text(
+                    'Últimas tentativas',
+                    style: TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w900,
+                      color: Color(0xFF292D35),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  for (final attempt in _history.take(5))
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(
+                        attempt.isCorrect
+                            ? Icons.check_circle_rounded
+                            : Icons.cancel_rounded,
+                        color: attempt.isCorrect
+                            ? const Color(0xFF49A96B)
+                            : const Color(0xFFE94B4B),
+                      ),
+                      title: Text(
+                        _capitalize(attempt.pokemon.name),
+                        style: const TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                      subtitle: Text(
+                        'Sua resposta: ${_capitalize(attempt.guess)}',
+                      ),
+                      trailing: Text(
+                        attempt.isCorrect ? 'Acerto' : 'Erro',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                ],
+              ],
+            ),
+          ),
+          Positioned.fill(
+            child: IgnorePointer(
+              child: CustomPaint(
+                painter: _ConfettiPainter(animation: _confettiController),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ConfettiPainter extends CustomPainter {
+  _ConfettiPainter({required this.animation}) : super(repaint: animation) {
+    final random = Random(23);
+    _particles = List.generate(90, (_) {
+      return _ConfettiParticle(
+        horizontalVelocity: (random.nextDouble() - 0.5) * 2.2,
+        verticalVelocity: random.nextDouble() * 1.2 + 0.25,
+        size: random.nextDouble() * 5 + 3,
+        delay: random.nextDouble() * 0.35,
+        color: _colors[random.nextInt(_colors.length)],
+        isCircle: random.nextBool(),
+        rotation: random.nextDouble() * pi,
+      );
+    });
+  }
+
+  final Animation<double> animation;
+  late final List<_ConfettiParticle> _particles;
+
+  static const _colors = [
+    Color(0xFFE94B4B),
+    Color(0xFFFFC857),
+    Color(0xFF48BFA3),
+    Color(0xFF6C63C7),
+    Color(0xFF4D96FF),
+    Color(0xFFFF85A1),
+  ];
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final progress = animation.value;
+    if (progress <= 0 || progress >= 1) return;
+
+    for (final particle in _particles) {
+      final elapsed = (progress - particle.delay).clamp(0.0, 1.0);
+      if (elapsed == 0) continue;
+      final fade = ((1 - progress) * 1.8).clamp(0.0, 1.0);
+      final paint = Paint()..color = particle.color.withValues(alpha: fade);
+      final x =
+          size.width * 0.5 +
+          particle.horizontalVelocity * elapsed * size.width * 0.55;
+      final y =
+          size.height * 0.24 +
+          particle.verticalVelocity * elapsed * size.height * 0.8 +
+          elapsed * elapsed * size.height * 0.35;
+      final rect = Rect.fromCenter(
+        center: Offset(x, y),
+        width: particle.size,
+        height: particle.size * 1.5,
+      );
+
+      if (particle.isCircle) {
+        canvas.drawCircle(rect.center, particle.size * 0.55, paint);
+      } else {
+        canvas.save();
+        canvas.translate(rect.center.dx, rect.center.dy);
+        canvas.rotate(particle.rotation + elapsed * 8);
+        canvas.drawRect(
+          Rect.fromCenter(
+            center: Offset.zero,
+            width: rect.width,
+            height: rect.height,
+          ),
+          paint,
+        );
+        canvas.restore();
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _ConfettiPainter oldDelegate) => false;
+}
+
+class _ConfettiParticle {
+  const _ConfettiParticle({
+    required this.horizontalVelocity,
+    required this.verticalVelocity,
+    required this.size,
+    required this.delay,
+    required this.color,
+    required this.isCircle,
+    required this.rotation,
+  });
+
+  final double horizontalVelocity;
+  final double verticalVelocity;
+  final double size;
+  final double delay;
+  final Color color;
+  final bool isCircle;
+  final double rotation;
 }
 
 class PokemonCard extends StatelessWidget {
