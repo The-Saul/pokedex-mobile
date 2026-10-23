@@ -375,9 +375,10 @@ class _PokedexHomePageState extends State<PokedexHomePage> {
                 Text(
                   'de bolso',
                   style: TextStyle(
-                    fontSize: 18,
+                    fontSize: 16,
+                    letterSpacing: 2,
                     fontWeight: FontWeight.w800,
-                    color: Color(0xFF292D35),
+                    color: Color.fromARGB(255, 51, 32, 32),
                   ),
                 ),
               ],
